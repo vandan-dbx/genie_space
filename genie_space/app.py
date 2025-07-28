@@ -7,244 +7,219 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 import sqlparse
+from flask import request
+import logging
+from genie_room import GenieClient
+import os
+import uuid
+
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
+from databricks.sdk.config import Config
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create Dash app
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.BOOTSTRAP]
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    title="Conversational Agent",
+    update_title=None,  # Disable automatic title updates
+    suppress_callback_exceptions=True
 )
 
-# Add default welcome text that can be customized
-DEFAULT_WELCOME_TITLE = "Supply Chain Optimization"
-DEFAULT_WELCOME_DESCRIPTION = "Analyze your Supply Chain Performance leveraging AI/BI Dashboard. Deep dive into your data and metrics."
+# Remove Dash favicon
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>Conversational app</title>
+        {%css%}
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
 
-# Add default suggestion questions
-DEFAULT_SUGGESTIONS = [
-    "What tables are there and how are they connected? Give me a short summary.",
-    "Which distribution center has the highest chance of being a bottleneck?",
-    "Explain the dataset",
-    "What was the demand for our products by week in 2024?"
-]
+# Add default welcome text that can be customized
+DEFAULT_WELCOME_TITLE = "Welcome to Your Data Assistant"
+DEFAULT_WELCOME_DESCRIPTION = "Explore and analyze your data with AI-powered insights. Ask questions, discover trends, and make data-driven decisions."
 
 # Define the layout
 app.layout = html.Div([
-    # Top navigation bar
     html.Div([
-        # Left component containing both nav-left and sidebar
+        dcc.Store(id="selected-space-id", data=None, storage_type="local"),
+        dcc.Store(id="spaces-list", data=[]),
+        dcc.Store(id="user-info", data={"initial": "Y", "username": "You"}),
+        # Space selection overlay
         html.Div([
-            # Nav left
-            html.Div([
-                html.Button([
-                    html.Img(src="assets/menu_icon.svg", className="menu-icon")
-                ], id="sidebar-toggle", className="nav-button"),
-                html.Button([
-                    html.Img(src="assets/plus_icon.svg", className="new-chat-icon")
-                ], id="new-chat-button", className="nav-button",disabled=False),
-                html.Button([
-                    html.Img(src="assets/plus_icon.svg", className="new-chat-icon"),
-                    html.Div("New chat", className="new-chat-text")
-                ], id="sidebar-new-chat-button", className="new-chat-button",disabled=False)
-            ], id="nav-left", className="nav-left"),
-            
-            # Sidebar
             html.Div([
                 html.Div([
-                    html.Div("Your conversations with Genie", className="sidebar-header-text"),
-                ], className="sidebar-header"),
-                html.Div([], className="chat-list", id="chat-list")
-            ], id="sidebar", className="sidebar")
-        ], id="left-component", className="left-component"),
-        
+                    html.Span(className="space-select-spinner"),
+                    "Loading Genie Spaces..."
+                ], id="space-select-title", className="space-select-title"),
+                dcc.Dropdown(id="space-dropdown", options=[], placeholder="Choose a Genie Space", className="space-select-dropdown", optionHeight=60, searchable=True),
+                html.Button("Select", id="select-space-button", className="space-select-button"),
+                html.Div(id="space-select-error", className="space-select-error")
+            ], className="space-select-card")
+        ], id="space-select-container", className="space-select-container"),
+        # Top navigation bar
         html.Div([
-            html.Div("Genie Space", id="logo-container", className="logo-container")
-        ], className="nav-center"),
-        html.Div([
-            html.Div("Y", className="user-avatar"),
-            html.A(
-                html.Button(
-                    "Logout",
-                    id="logout-button",
-                    className="logout-button"
-                ),
-                href=f"https://{os.getenv('DATABRICKS_HOST')}/login.html",
-                className="logout-link"
-            )
-        ], className="nav-right")
-    ], className="top-nav"),
-    
-    # Main content area
-    html.Div([
-        html.Div([
-            # Chat content
+            # Left component containing both nav-left and sidebar
             html.Div([
-                # Welcome container
+                # Nav left
                 html.Div([
-                    html.Div([html.Div([
-                    html.Div(className="genie-logo")
-                ], className="genie-logo-container")],
-                className="genie-logo-container-header"),
-               
-                    # Add settings button with tooltip
-                    html.Div([
-                        html.Div(id="welcome-title", className="welcome-message", children=DEFAULT_WELCOME_TITLE),
-                        html.Button([
-                            html.Img(src="assets/settings_icon.svg", className="settings-icon"),
-                            html.Div("Customize welcome message", className="button-tooltip")
-                        ],
-                        id="edit-welcome-button",
-                        className="edit-welcome-button",
-                        title="Customize welcome message")
-                    ], className="welcome-title-container"),
-                    
-                    html.Div(id="welcome-description", 
-                            className="welcome-message-description",
-                            children=DEFAULT_WELCOME_DESCRIPTION),
-                    
-                    # Add modal for editing welcome text
-                    dbc.Modal([
-                        dbc.ModalHeader(dbc.ModalTitle("Customize Welcome Message")),
-                        dbc.ModalBody([
-                            html.Div([
-                                html.Label("Welcome Title", className="modal-label"),
-                                dbc.Input(
-                                    id="welcome-title-input",
-                                    type="text",
-                                    placeholder="Enter a title for your welcome message",
-                                    className="modal-input"
-                                ),
-                                html.Small(
-                                    "This title appears at the top of your welcome screen",
-                                    className="text-muted d-block mt-1"
-                                )
-                            ], className="modal-input-group"),
-                            html.Div([
-                                html.Label("Welcome Description", className="modal-label"),
-                                dbc.Textarea(
-                                    id="welcome-description-input",
-                                    placeholder="Enter a description that helps users understand the purpose of your application",
-                                    className="modal-input",
-                                    style={"height": "80px"}
-                                ),
-                                html.Small(
-                                    "This description appears below the title and helps guide your users",
-                                    className="text-muted d-block mt-1"
-                                )
-                            ], className="modal-input-group"),
-                            html.Div([
-                                html.Label("Suggestion Questions", className="modal-label"),
-                                html.Small(
-                                    "Customize the four suggestion questions that appear on the welcome screen",
-                                    className="text-muted d-block mb-3"
-                                ),
-                                dbc.Input(
-                                    id="suggestion-1-input",
-                                    type="text",
-                                    placeholder="First suggestion question",
-                                    className="modal-input mb-2"
-                                ),
-                                dbc.Input(
-                                    id="suggestion-2-input",
-                                    type="text",
-                                    placeholder="Second suggestion question",
-                                    className="modal-input mb-2"
-                                ),
-                                dbc.Input(
-                                    id="suggestion-3-input",
-                                    type="text",
-                                    placeholder="Third suggestion question",
-                                    className="modal-input mb-2"
-                                ),
-                                dbc.Input(
-                                    id="suggestion-4-input",
-                                    type="text",
-                                    placeholder="Fourth suggestion question",
-                                    className="modal-input"
-                                )
-                            ], className="modal-input-group")
-                        ]),
-                        dbc.ModalFooter([
-                            dbc.Button(
-                                "Cancel",
-                                id="close-modal",
-                                className="modal-button",
-                                color="light"
-                            ),
-                            dbc.Button(
-                                "Save Changes",
-                                id="save-welcome-text",
-                                className="modal-button-primary",
-                                color="primary"
-                            )
-                        ])
-                    ], id="edit-welcome-modal", is_open=False, size="lg", backdrop="static"),
-                    
-                    # Suggestion buttons with IDs
-                    html.Div([
-                        html.Button([
-                            html.Div(className="suggestion-icon"),
-                            html.Div("What tables are there and how are they connected? Give me a short summary.", 
-                                   className="suggestion-text", id="suggestion-1-text")
-                        ], id="suggestion-1", className="suggestion-button"),
-                        html.Button([
-                            html.Div(className="suggestion-icon"),
-                            html.Div("Which distribution center has the highest chance of being a bottleneck?",
-                                   className="suggestion-text", id="suggestion-2-text")
-                        ], id="suggestion-2", className="suggestion-button"),
-                        html.Button([
-                            html.Div(className="suggestion-icon"),
-                            html.Div("Explain the dataset",
-                                   className="suggestion-text", id="suggestion-3-text")
-                        ], id="suggestion-3", className="suggestion-button"),
-                        html.Button([
-                            html.Div(className="suggestion-icon"),
-                            html.Div("What was the demand for our products by week in 2024?",
-                                   className="suggestion-text", id="suggestion-4-text")
-                        ], id="suggestion-4", className="suggestion-button")
-                    ], className="suggestion-buttons")
-                ], id="welcome-container", className="welcome-container visible"),
+                    html.Button([
+                        html.Img(src="assets/menu_icon.svg", className="menu-icon")
+                    ], id="sidebar-toggle", className="nav-button"),
+                    html.Button([
+                        html.Img(src="assets/plus_icon.svg", className="new-chat-icon")
+                    ], id="new-chat-button", className="nav-button",disabled=False),
+                    html.Button([
+                        html.Img(src="assets/plus_icon.svg", className="new-chat-icon"),
+                        html.Div("New chat", className="new-chat-text")
+                    ], id="sidebar-new-chat-button", className="new-chat-button",disabled=False)
+                ], id="nav-left", className="nav-left"),
                 
-                # Chat messages
-                html.Div([], id="chat-messages", className="chat-messages"),
-            ], id="chat-content", className="chat-content"),
-            
-            # Input area
-            html.Div([
+                # Sidebar
                 html.Div([
-                    dcc.Input(
-                        id="chat-input-fixed",
-                        placeholder="Ask your question...",
-                        className="chat-input",
-                        type="text",
-                        disabled=False
-                    ),
                     html.Div([
-                        html.Button(
-                            id="send-button-fixed", 
-                            className="input-button send-button",
+                        html.Div("Your conversations with Agent", className="sidebar-header-text"),
+                    ], className="sidebar-header"),
+                    html.Div([], className="chat-list", id="chat-list")
+                ], id="sidebar", className="sidebar")
+            ], id="left-component", className="left-component"),
+            
+            html.Div([
+                html.Div("Conversational Agent", id="logo-container", className="logo-container")
+            ], className="nav-center"),
+            html.Div([
+                html.Div("Y", id="top-nav-avatar", className="user-avatar"),
+                html.A(
+                    html.Button(
+                        "Logout",
+                        id="logout-button",
+                        className="logout-button"
+                    ),
+                    href=f"{os.getenv('DATABRICKS_APP_URL')}",
+                    className="logout-link"
+                )
+            ], className="nav-right")
+        ], className="top-nav"),
+        
+        # Main content area
+        html.Div([
+            html.Div([
+                # Chat content
+                html.Div([
+                    # Welcome container
+                    html.Div([
+                        html.Div([html.Div([
+                        html.Div(className="genie-logo")
+                    ], className="genie-logo-container")],
+                    className="genie-logo-container-header"),
+                   
+                        # Add settings button with tooltip
+                        html.Div([
+                            html.Div(id="welcome-title", className="welcome-message", children=DEFAULT_WELCOME_TITLE),
+                        ], className="welcome-title-container"),
+                        
+                        html.Div(id="welcome-description", 
+                                className="welcome-message-description",
+                                children=DEFAULT_WELCOME_DESCRIPTION),
+                        
+                        # Suggestion buttons with IDs
+                        html.Div([
+                            html.Button([
+                                html.Div(className="suggestion-icon"),
+                                html.Div("What tables are there and how are they connected? Give me a short summary.", 
+                                       className="suggestion-text", id="suggestion-1-text")
+                            ], id="suggestion-1", className="suggestion-button"),
+                            html.Button([
+                                html.Div(className="suggestion-icon"),
+                                html.Div("Describe the relationships between the tables.",
+                                       className="suggestion-text", id="suggestion-2-text")
+                            ], id="suggestion-2", className="suggestion-button"),
+                            html.Button([
+                                html.Div(className="suggestion-icon"),
+                                html.Div("Explain the dataset.",
+                                       className="suggestion-text", id="suggestion-3-text")
+                            ], id="suggestion-3", className="suggestion-button"),
+                            html.Button([
+                                html.Div(className="suggestion-icon"),
+                                html.Div("What columns or fields are available in this dataset?",
+                                       className="suggestion-text", id="suggestion-4-text")
+                            ], id="suggestion-4", className="suggestion-button")
+                        ], className="suggestion-buttons")
+                    ], id="welcome-container", className="welcome-container visible"),
+                    
+                    # Chat messages
+                    html.Div([], id="chat-messages", className="chat-messages"),
+                ], id="chat-content", className="chat-content"),
+                
+                # Input area
+                html.Div([
+                    html.Div([
+                        dcc.Input(
+                            id="chat-input-fixed",
+                            placeholder="Ask your question...",
+                            className="chat-input",
+                            type="text",
                             disabled=False
-                        )
-                    ], className="input-buttons-right"),
-                    html.Div("You can only submit one query at a time", 
-                            id="query-tooltip", 
-                            className="query-tooltip hidden")
-                ], id="fixed-input-container", className="fixed-input-container"),
-                html.Div("Always review the accuracy of responses.", className="disclaimer-fixed")
-            ], id="fixed-input-wrapper", className="fixed-input-wrapper"),
-        ], id="chat-container", className="chat-container"),
-    ], id="main-content", className="main-content"),
-    
-    html.Div(id='dummy-output'),
-    dcc.Store(id="chat-trigger", data={"trigger": False, "message": ""}),
-    dcc.Store(id="chat-history-store", data=[]),
-    dcc.Store(id="query-running-store", data=False),
-    dcc.Store(id="session-store", data={"current_session": None})
-])
+                        ),
+                        html.Div([
+                            html.Button(
+                                id="send-button-fixed", 
+                                className="input-button send-button",
+                                disabled=False
+                            )
+                        ], className="input-buttons-right"),
+                        html.Div("You can only submit one query at a time", 
+                                id="query-tooltip", 
+                                className="query-tooltip")
+                    ], id="fixed-input-container", className="fixed-input-container"),
+                    html.Div("Always review the accuracy of responses.", className="disclaimer-fixed")
+                ], id="fixed-input-wrapper", className="fixed-input-wrapper"),
+            ], id="chat-container", className="chat-container"),
+        ], id="main-content", className="main-content", style={"display": "none"}),
+        
+        html.Div(id='dummy-output'),
+        dcc.Store(id="chat-trigger", data={"trigger": False, "message": ""}),
+        dcc.Store(id="chat-history-store", data=[]),
+        dcc.Store(id="query-running-store", data=False),
+        dcc.Store(id="session-store", data={"current_session": None})
+    ], id="app-inner-layout"),
+], id="root-container")
 
 # Store chat history
 chat_history = []
+
+def get_user_info_from_headers():
+    """Extract user information from request headers"""
+    try:
+        username = request.headers.get("X-Forwarded-Preferred-Username", "").split("@")[0]
+        username = username.split(".")
+        username = [part[0].upper() + part[1:] for part in username]
+        username = " ".join(username)
+
+        if username:
+            initial = username[0].upper()
+            return {"initial": initial, "username": username}
+        else:
+            return {"initial": "Y", "username": "You"}
+    except Exception as e:
+        logger.warning(f"Failed to extract user info from headers: {str(e)}")
+        return {"initial": "Y", "username": "You"}
 
 def format_sql_query(sql_query):
     """Format SQL query using sqlparse library"""
@@ -257,37 +232,17 @@ def format_sql_query(sql_query):
         strip_comments=False,  # Preserves comments
         comma_first=False      # Commas at the end of line, not beginning
     )
-    return formatted_sql
+    return formatted_sql 
 
-def call_llm_for_insights(df, prompt=None):
-    """
-    Call an LLM to generate insights from a DataFrame.
-    Args:
-        df: pandas DataFrame
-        prompt: Optional custom prompt
-    Returns:
-        str: Insights generated by the LLM
-    """
-    if prompt is None:
-        prompt = (
-            "You are a professional data analyst. Given the following table data, "
-            "provide deep, actionable analysis for 1. Key insights and trends 2. Notable patterns and" 
-            " anomalies 3. Business implications."
-            "Be thorough, professional, and concise.\n\n"
-        )
-    csv_data = df.to_csv(index=False)
-    full_prompt = f"{prompt}Table data:\n{csv_data}"
-    # Call OpenAI (replace with your own LLM provider as needed)
-    try:
-        client = WorkspaceClient()
-        response = client.serving_endpoints.query(
-            os.getenv("SERVING_ENDPOINT_NAME"),
-            messages=[ChatMessage(content=full_prompt, role=ChatMessageRole.USER)],
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error generating insights: {str(e)}"
-    
+# Callback to initialize user info from headers
+@app.callback(
+    Output("user-info", "data"),
+    Input("user-info", "id"),
+    prevent_initial_call=False
+)
+def initialize_user_info(_):
+    """Initialize user info from request headers"""
+    return get_user_info_from_headers()
 
 # First callback: Handle inputs and show thinking indicator
 @app.callback(
@@ -314,12 +269,13 @@ def call_llm_for_insights(df, prompt=None):
      State("welcome-container", "className"),
      State("chat-list", "children"),
      State("chat-history-store", "data"),
-     State("session-store", "data")],
+     State("session-store", "data"),
+     State("user-info", "data")],
     prevent_initial_call=True
 )
 def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, submit_clicks,
                      s1_text, s2_text, s3_text, s4_text, input_value, current_messages,
-                     welcome_class, current_chat_list, chat_history, session_data):
+                     welcome_class, current_chat_list, chat_history, session_data, user_info):
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 8
@@ -344,10 +300,13 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
         return [no_update] * 8
     
     # Create user message with user info
+    user_initial = user_info.get("initial", "Y") if user_info else "Y"
+    username = user_info.get("username", "You") if user_info else "You"
+    
     user_message = html.Div([
         html.Div([
-            html.Div("Y", className="user-avatar"),
-            html.Span("You", className="model-name")
+            html.Div(user_initial, className="user-avatar"),
+            html.Span(username, className="model-name")
         ], className="user-info"),
         html.Div(user_input, className="message-text")
     ], className="user-message message")
@@ -410,10 +369,11 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
      Output("query-running-store", "data", allow_duplicate=True)],
     [Input("chat-trigger", "data")],
     [State("chat-messages", "children"),
-     State("chat-history-store", "data")],
+     State("chat-history-store", "data"),
+     State("selected-space-id", "data")],
     prevent_initial_call=True
 )
-def get_model_response(trigger_data, current_messages, chat_history):
+def get_model_response(trigger_data, current_messages, chat_history, selected_space_id):
     if not trigger_data or not trigger_data.get("trigger"):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
@@ -422,19 +382,36 @@ def get_model_response(trigger_data, current_messages, chat_history):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     try:
-        response, query_text = genie_query(user_input)
+        headers = request.headers
+        # user_token = os.environ.get("DATABRICKS_TOKEN")
+        user_token = headers.get('X-Forwarded-Access-Token')
+        response, query_text = genie_query(user_input, user_token, selected_space_id)
         
         if isinstance(response, str):
-            content = dcc.Markdown(response, className="message-text")
+            # Escape square brackets to prevent markdown auto-linking
+            import re
+            processed_response = response
+            
+            # Escape all square brackets to prevent markdown from interpreting them as links
+            processed_response = processed_response.replace('[', '\\[').replace(']', '\\]')
+            
+            # Escape parentheses to prevent markdown from interpreting them as links
+            processed_response = processed_response.replace('(', '\\(').replace(')', '\\)')
+            
+            # Escape angle brackets to prevent markdown from interpreting them as links
+            processed_response = processed_response.replace('<', '\\<').replace('>', '\\>')
+            
+            content = dcc.Markdown(processed_response, className="message-text")
         else:
             # Data table response
             df = pd.DataFrame(response)
             
             # Store the DataFrame in chat_history for later retrieval by insight button
             if chat_history and len(chat_history) > 0:
-                chat_history[0].setdefault('dataframes', {})[f"table-{len(chat_history)}"] = df.to_json(orient='split')
+                table_uuid = str(uuid.uuid4())
+                chat_history[0].setdefault('dataframes', {})[table_uuid] = df.to_json(orient='split')
             else:
-                chat_history = [{"dataframes": {f"table-{len(chat_history)}": df.to_json(orient='split')}}]
+                chat_history = [{"dataframes": {table_uuid: df.to_json(orient='split')}}]
             
             # Create the table with adjusted styles
             data_table = dash_table.DataTable(
@@ -500,19 +477,6 @@ def get_model_response(trigger_data, current_messages, chat_history):
                     id={"type": "query-code", "index": query_index}, 
                     className="query-code-container hidden")
                 ], id={"type": "query-section", "index": query_index}, className="query-section")
-            
-            insight_button = html.Button(
-                "Generate Insights",
-                id={"type": "insight-button", "index": f"table-{len(chat_history)}"},
-                className="insight-button",
-                style={"border": "none", "background": "#f0f0f0", "padding": "8px 16px", "borderRadius": "4px", "cursor": "pointer"}
-            )
-            insight_output = dcc.Loading(
-                id={"type": "insight-loading", "index": f"table-{len(chat_history)}"},
-                type="circle",
-                color="#000000",
-                children=html.Div(id={"type": "insight-output", "index": f"table-{len(chat_history)}"})
-            )
 
             # Create content with table and optional SQL section
             content = html.Div([
@@ -521,30 +485,16 @@ def get_model_response(trigger_data, current_messages, chat_history):
                     'paddingRight': '5px'
                 }),
                 query_section if query_section else None,
-                insight_button,
-                insight_output,
             ])
         
         # Create bot response
         bot_response = html.Div([
             html.Div([
                 html.Div(className="model-avatar"),
-                html.Span("Genie", className="model-name")
+                html.Span("Agent", className="model-name")
             ], className="model-info"),
             html.Div([
                 content,
-                html.Div([
-                    html.Div([
-                        html.Button(
-                            id={"type": "thumbs-up-button", "index": len(chat_history)},
-                            className="thumbs-up-button"
-                        ),
-                        html.Button(
-                            id={"type": "thumbs-down-button", "index": len(chat_history)},
-                            className="thumbs-down-button"
-                        )
-                    ], className="message-actions")
-                ], className="message-footer")
             ], className="message-content")
         ], className="bot-message message")
         
@@ -558,7 +508,7 @@ def get_model_response(trigger_data, current_messages, chat_history):
         error_response = html.Div([
             html.Div([
                 html.Div(className="model-avatar"),
-                html.Span("Genie", className="model-name")
+                html.Span("Agent", className="model-name")
             ], className="model-info"),
             html.Div([
                 html.Div(error_msg, className="message-text")
@@ -644,10 +594,12 @@ def show_chat_history(n_clicks, chat_history, current_chat_list, session_data):
 app.clientside_callback(
     """
     function(children) {
-        var chatMessages = document.getElementById('chat-messages');
-        if (chatMessages) {
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
+        setTimeout(function() {
+            var chatMessages = document.getElementById('chat-messages');
+            if (chatMessages) {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        }, 100);
         return '';
     }
     """,
@@ -698,45 +650,13 @@ def reset_query_running(chat_messages):
     [Output("chat-input-fixed", "disabled"),
      Output("send-button-fixed", "disabled"),
      Output("new-chat-button", "disabled"),
-     Output("sidebar-new-chat-button", "disabled"),
-     Output("query-tooltip", "className")],
+     Output("sidebar-new-chat-button", "disabled")],
     [Input("query-running-store", "data")],
     prevent_initial_call=True
 )
 def toggle_input_disabled(query_running):
-    # Show tooltip when query is running, hide it otherwise
-    tooltip_class = "query-tooltip visible" if query_running else "query-tooltip hidden"
-    
     # Disable input and buttons when query is running
-    return query_running, query_running, query_running, query_running, tooltip_class
-
-
-# Fix the callback for thumbs up/down buttons
-@app.callback(
-    [Output({"type": "thumbs-up-button", "index": MATCH}, "className"),
-     Output({"type": "thumbs-down-button", "index": MATCH}, "className")],
-    [Input({"type": "thumbs-up-button", "index": MATCH}, "n_clicks"),
-     Input({"type": "thumbs-down-button", "index": MATCH}, "n_clicks")],
-    [State({"type": "thumbs-up-button", "index": MATCH}, "className"),
-     State({"type": "thumbs-down-button", "index": MATCH}, "className")],
-    prevent_initial_call=True
-)
-def handle_feedback(up_clicks, down_clicks, up_class, down_class):
-    ctx = callback_context
-    if not ctx.triggered:
-        return dash.no_update, dash.no_update
-    
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    button_type = json.loads(trigger_id)["type"]
-    
-    if button_type == "thumbs-up-button":
-        new_up_class = "thumbs-up-button active" if "active" not in up_class else "thumbs-up-button"
-        new_down_class = "thumbs-down-button"
-    else:
-        new_up_class = "thumbs-up-button"
-        new_down_class = "thumbs-down-button active" if "active" not in down_class else "thumbs-down-button"
-    
-    return new_up_class, new_down_class
+    return query_running, query_running, query_running, query_running
 
 # Add callback for toggling SQL query visibility
 @app.callback(
@@ -750,106 +670,136 @@ def toggle_query_visibility(n_clicks):
         return "query-code-container visible", "Hide code"
     return "query-code-container hidden", "Show code"
 
-# Add callbacks for welcome text customization
+
+# Callback to fetch spaces on load
 @app.callback(
-    [Output("edit-welcome-modal", "is_open", allow_duplicate=True),
-     Output("welcome-title-input", "value"),
-     Output("welcome-description-input", "value"),
-     Output("suggestion-1-input", "value"),
-     Output("suggestion-2-input", "value"),
-     Output("suggestion-3-input", "value"),
-     Output("suggestion-4-input", "value")],
-    [Input("edit-welcome-button", "n_clicks")],
-    [State("welcome-title", "children"),
-     State("welcome-description", "children"),
-     State("suggestion-1-text", "children"),
-     State("suggestion-2-text", "children"),
-     State("suggestion-3-text", "children"),
-     State("suggestion-4-text", "children")],
+    Output("spaces-list", "data"),
+    Input("space-select-container", "id"),
+    prevent_initial_call=False
+)
+def fetch_spaces(_):
+    try:
+        headers = request.headers
+        # token = os.environ.get("DATABRICKS_TOKEN")
+        token = headers.get('X-Forwarded-Access-Token')
+        host = os.environ.get("DATABRICKS_HOST")
+        client = GenieClient(host=host, space_id="", token=token)
+        spaces = client.list_spaces()
+        return spaces
+    except Exception as e:
+        return []
+
+# Populate dropdown options
+@app.callback(
+    Output("space-dropdown", "options"),
+    Input("spaces-list", "data"),
+    prevent_initial_call=False
+)
+def update_space_dropdown(spaces):
+    if not spaces:
+        return []
+    options = []
+    for s in spaces:
+        title = s.get('title', '')
+        space_id = s.get('space_id', '')
+        label_lines = [title]
+        label_lines.append(space_id)
+        label = " | ".join(label_lines)  # or use '\\n'.join(label_lines) for multi-line (but most browsers will show as a single line)
+        options.append({"label": label, "value": space_id})
+    return options
+
+# Handle space selection
+@app.callback(
+    [Output("selected-space-id", "data", allow_duplicate=True),
+     Output("space-select-container", "style"),
+     Output("main-content", "style"),
+     Output("space-select-error", "children"),
+     Output("welcome-title", "children"),
+     Output("welcome-description", "children")],
+    Input("select-space-button", "n_clicks"),
+    State("space-dropdown", "value"),
+    State("spaces-list", "data"),
     prevent_initial_call=True
 )
-def open_modal(n_clicks, current_title, current_description, s1, s2, s3, s4):
+def select_space(n_clicks, space_id, spaces):
     if not n_clicks:
-        return [no_update] * 7
-    return True, current_title, current_description, s1, s2, s3, s4
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    if not space_id:
+        return dash.no_update, {"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center", "height": "100vh"}, {"display": "none"}, "Please select a Genie space.", dash.no_update, dash.no_update
+    # Find the selected space's title and description
+    selected = next((s for s in spaces if s["space_id"] == space_id), None)
+    title = selected["title"] if selected and selected.get("title") else DEFAULT_WELCOME_TITLE
+    description = selected["description"] if selected and selected.get("description") else DEFAULT_WELCOME_DESCRIPTION
+    return space_id, {"display": "none"}, {"display": "block"}, "", title, description
 
+# Add a callback to control visibility of main-content and space-select-container
 @app.callback(
-    [Output("welcome-title", "children", allow_duplicate=True),
-     Output("welcome-description", "children", allow_duplicate=True),
-     Output("suggestion-1-text", "children", allow_duplicate=True),
-     Output("suggestion-2-text", "children", allow_duplicate=True),
-     Output("suggestion-3-text", "children", allow_duplicate=True),
-     Output("suggestion-4-text", "children", allow_duplicate=True),
-     Output("edit-welcome-modal", "is_open", allow_duplicate=True)],
-    [Input("save-welcome-text", "n_clicks"),
-     Input("close-modal", "n_clicks")],
-    [State("welcome-title-input", "value"),
-     State("welcome-description-input", "value"),
-     State("suggestion-1-input", "value"),
-     State("suggestion-2-input", "value"),
-     State("suggestion-3-input", "value"),
-     State("suggestion-4-input", "value"),
-     State("welcome-title", "children"),
-     State("welcome-description", "children"),
-     State("suggestion-1-text", "children"),
-     State("suggestion-2-text", "children"),
-     State("suggestion-3-text", "children"),
-     State("suggestion-4-text", "children")],
+    [Output("main-content", "style", allow_duplicate=True), Output("space-select-container", "style", allow_duplicate=True)],
+    Input("selected-space-id", "data"),
     prevent_initial_call=True
 )
-def handle_modal_actions(save_clicks, close_clicks,
-                        new_title, new_description, s1, s2, s3, s4,
-                        current_title, current_description,
-                        current_s1, current_s2, current_s3, current_s4):
-    ctx = callback_context
-    if not ctx.triggered:
-        return [no_update] * 7
+def toggle_main_ui(selected_space_id):
+    if selected_space_id:
+        return {"display": "block"}, {"display": "none"}
+    else:
+        return {"display": "none"}, {"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center", "height": "100vh"}
 
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-
-    if trigger_id == "close-modal":
-        return [current_title, current_description, 
-                current_s1, current_s2, current_s3, current_s4, False]
-    elif trigger_id == "save-welcome-text":
-        # Save the changes
-        title = new_title if new_title else DEFAULT_WELCOME_TITLE
-        description = new_description if new_description else DEFAULT_WELCOME_DESCRIPTION
-        suggestions = [
-            s1 if s1 else DEFAULT_SUGGESTIONS[0],
-            s2 if s2 else DEFAULT_SUGGESTIONS[1],
-            s3 if s3 else DEFAULT_SUGGESTIONS[2],
-            s4 if s4 else DEFAULT_SUGGESTIONS[3]
-        ]
-        return [title, description, *suggestions, False]
-
-    return [no_update] * 7
-
-# Add callback for insight button
 @app.callback(
-    Output({"type": "insight-output", "index": dash.dependencies.MATCH}, "children"),
-    Input({"type": "insight-button", "index": dash.dependencies.MATCH}, "n_clicks"),
-    State({"type": "insight-button", "index": dash.dependencies.MATCH}, "id"),
-    State("chat-history-store", "data"),
+    Output("selected-space-id", "data", allow_duplicate=True),
+    Input("logout-button", "n_clicks"),
     prevent_initial_call=True
 )
-def generate_insights(n_clicks, btn_id, chat_history):
-    if not n_clicks:
-        return None  # Don't show anything before click
-    table_id = btn_id["index"]
-    # Retrieve the DataFrame from chat_history
-    df = None
-    if chat_history and len(chat_history) > 0:
-        df_json = chat_history[0].get('dataframes', {}).get(table_id)
-        if df_json:
-            df = pd.read_json(df_json, orient='split')
-    if df is None:
+def logout_and_clear_space(n_clicks):
+    if n_clicks:
         return None
-    insights = call_llm_for_insights(df)
-    return html.Div([
-        html.Div([
-            dcc.Markdown(insights, className="insight-content")
-        ], className="insight-body")
-    ], className="insight-wrapper")
+    return dash.no_update
+
+# Add a callback to control the root-container style to prevent scrolling when overlay is visible
+@app.callback(
+    Output("root-container", "style"),
+    Input("selected-space-id", "data"),
+    prevent_initial_call=False
+)
+def set_root_style(selected_space_id):
+    if selected_space_id:
+        return {"height": "auto", "overflow": "auto"}
+    else:
+        return {"height": "100vh", "overflow": "hidden"}
+
+# Add a callback to update the title based on spaces-list
+@app.callback(
+    Output("space-select-title", "children"),
+    Input("spaces-list", "data"),
+    prevent_initial_call=False
+)
+def update_space_select_title(spaces):
+    if not spaces:
+        return [html.Span(className="space-select-spinner"), "Loading Genie Spaces..."]
+    return "Select a Genie Space"
+
+@app.callback(
+    Output("query-tooltip", "className"),
+    Input("query-running-store", "data"),
+    prevent_initial_call=False
+)
+def update_query_tooltip_class(query_running):
+    # Only show tooltip if query is running
+    if query_running:
+        return "query-tooltip query-tooltip-active"
+    else:
+        return "query-tooltip"
+
+# Callback to update top navigation avatar
+@app.callback(
+    Output("top-nav-avatar", "children"),
+    Input("user-info", "data"),
+    prevent_initial_call=False
+)
+def update_top_nav_avatar(user_info):
+    """Update the top navigation avatar with user initial"""
+    if user_info and user_info.get("initial"):
+        return user_info["initial"]
+    return "Y"
 
 if __name__ == "__main__":
     app.run_server(debug=True)
