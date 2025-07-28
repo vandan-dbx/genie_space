@@ -380,13 +380,23 @@ def get_model_response(trigger_data, current_messages, chat_history, selected_sp
     
     try:
         headers = request.headers
-        # user_token = os.environ.get("DATABRICKS_TOKEN")
         user_token = headers.get('X-Forwarded-Access-Token')
-        background_context = chat_history['data'][-1]['queries'][-5:].join('\n')
-        background_text = f"'For additional context, the last {len(background_context)} questions the user has asked in this conversation:\n"
-        if len(background_context)>0:
-            input = background_text + background_context + "\nThe user's current question:\n" + user_input
-        response, query_text = genie_query(input, user_token, selected_space_id)
+        # Build context from previous queries
+        input_with_context = user_input  # Default to just the user input
+        
+        if chat_history and len(chat_history) > 0:
+            # Get the current session (most recent one, which is at index 0)
+            current_session = chat_history[0]
+            if 'queries' in current_session and len(current_session['queries']) > 1:
+                # Get the last 5 queries (excluding the current one we just added)
+                previous_queries = current_session['queries'][-5:]
+                
+                if previous_queries:
+                    background_context = '\n'.join(previous_queries)
+                    background_text = f"For additional context, the last {len(previous_queries)} questions the user has asked in this conversation:\n"
+                    input_with_context = background_text + background_context + "\nThe user's current question:\n" + user_input
+        
+        response, query_text = genie_query(input_with_context, user_token, selected_space_id)
         
         if isinstance(response, str):
             # Escape square brackets to prevent markdown auto-linking
@@ -688,7 +698,7 @@ def fetch_spaces(_):
         spaces = client.list_spaces()
         return spaces
     except Exception as e:
-        return []
+        return [{'title': repr(e)}]
 
 # Populate dropdown options
 @app.callback(
