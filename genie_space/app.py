@@ -13,9 +13,6 @@ from genie_room import GenieClient
 import os
 import uuid
 
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-from databricks.sdk.config import Config
 load_dotenv()
 
 # Configure logging
@@ -385,7 +382,11 @@ def get_model_response(trigger_data, current_messages, chat_history, selected_sp
         headers = request.headers
         # user_token = os.environ.get("DATABRICKS_TOKEN")
         user_token = headers.get('X-Forwarded-Access-Token')
-        response, query_text = genie_query(user_input, user_token, selected_space_id)
+        background_context = chat_history['data'][-1]['queries'][-5:].join('\n')
+        background_text = f"'For additional context, the last {len(background_context)} questions the user has asked in this conversation:\n"
+        if len(background_context)>0:
+            input = background_text + background_context + "\nThe user's current question:\n" + user_input
+        response, query_text = genie_query(input, user_token, selected_space_id)
         
         if isinstance(response, str):
             # Escape square brackets to prevent markdown auto-linking
